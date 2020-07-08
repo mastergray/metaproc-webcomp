@@ -1,208 +1,172 @@
-const UTIL = require("common-fn-js");
-const METAPROC = require("metaproc");
-const cheerio = require("cheerio");
-const axios = require("axios");
+const UTIL = require("common-fn-js");   // Utility methods
+const METAPROC = require("metaproc");   // How this gets structured
+const cheerio = require("cheerio");     // HTML Parser
+const axios = require("axios");         // For making HTTP requests
 
-module.exports = WEBCOMP = () => METAPROC.init([
-  METAPROC.standard,
-  WEBCOMP.ops
-], (STATE, fn) => {
-  return function (HTMLString, model) {
-    return METAPROC.init()
-      .run({
-        "$":cheerio.load(HTMLString), // HTML to operate on
-        "controllers":[],             // Stores controllers that will need to be transpiled to run client side
-        "model":model || {}           // Client side STATE
-      })
-      .then(expandControllers);      // Creates client side HTML and returns STRING
-  }
-});
+// Uses metaproc-js to generate HTML files
+module.exports = WEBCOMP = (STATE) => METAPROC.Standard(STATE)
+
+  // select :: (STRING) -> (METAPROC) -> METAPROC
+  // Binds node returned by selector to "selected" PROPERTY of STATE:
+  .augment("select", (selector) => metaproc => metaproc.apto("selected", (selected, STATE) => {
+    return STATE.$(selector)
+  }))
+
+  // modify :: (NODE, STATE -> VOID) -> (METAPROC) -> METAPROC
+  // Applies function to selected node:
+  // NOTE: Result of function applied to selected node is not bound to "selected" PROPERTY:
+  .augment("modify", (fn) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    await fn(selected, STATE);
+    return selected;
+  }))
+
+  /**
+   *
+   *  DOM Operations
+   *
+   */
+
+  // append :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAPROC
+  // Appends NODE, HTMLString, or PROMISE of NODE or HTMLString to selected element:
+  .augment("append", (node) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.append(await node);
+    return selected;
+  }))
+
+  // prepend :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAPROC
+  // Prepends NODE, HTMLString, or PROMISE of NODE or HTMLString to selected element:
+  .augment("prepend", (node) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.prepend(await node);
+    return selected;
+  }))
+
+  // after :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAPROC
+  // Inserts NODE, HTMLString, or PROMISE of NODE or HTMLString after selected NODE:
+  .augment("after", (node) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.after(await node);
+    return selected;
+  }))
+
+  // before :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAPROC
+  // Inserts NODE, HTMLString, or PROMISE of NODE or HTMLStringg before selected NODE:
+  .augment("before", (node) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.before(await node);
+    return selected;
+  }))
+
+
+  // replace :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAPROC
+  // Replace selected node with given NODE, HTMLString, or PROMISE of NODE or HTMLString:
+  .augment("replace", (node) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.replaceWith(await node);
+    return selected;
+  }))
+
+  // innerHTML :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAROC
+  // Replace HTML with NODE, HTMLString, or PROMISE of NODE or HTMLString:
+  .augment("innerHTML", (HTMLString) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+    selected.empty();
+    selected.append(await HTMLString);
+    return selected;
+  }))
+
+  // remove :: (VOID) -> (METAPROC) -> METAPROC
+  // Removes selected NODE:
+  // NOTE: UNDEFINED is then set as the "selected" node:
+  .augment("remove", () => metaproc => metaproc.apto("selected", (selected, STATE) => {
+    selected.remove();
+    return undefined;
+  }))
 
 /**
  *
- *  WEBCOMP Operations
+ *  "Static" Methods
  *
  */
 
-WEBCOMP.ops = [
+  // unit :: STRING, STRING -> METAPROC
+  // "Unit" monadic operator for WEBCOMP
+  WEBCOMP.of = (htmlString, selector) => METAPROC.Standard()
+    .asifnot("$", cheerio.load(htmlString || ""))
+    .chain((STATE) => METAPROC.Standard(STATE)
+      .asifnot("selected", selector !== undefined ? STATE.$(selector) : undefined ))
+    .lift(WEBCOMP)
 
-  // webcomp.controller :: ((NODE) -> BOOLEAN, STRING, (EVENT) -> VOID) -> PROMISE(STATE)
-  // Stores controller to render client-side in STATE:
-  // NOTE: pred and fn is applied to a client-side event
-  METAPROC.op("controller", (pred, evtName, fn) => {
-    STATE.controllers.push({
-      "pred":pred,              // BOOLEAN function that determines if function to be applied to event
-      "evtName":evtName,        // Event type to apply function to
-      "fn":fn                   // function that gets applied
-    })
-  }),
+  // Initializes WEBCOMP with HTML loaded from res:
+  // NOTE: If fragment is loaded - it will be wrapped in <html><head></head><body>[framgent]</body></html>
+  WEBCOMP.ofHTML = (res, selector) => METAPROC.Standard()
+    .asifnot("$", WEBCOMP.loadResource(res).then(cheerio.load))
+    .chain((STATE) => METAPROC.Standard(STATE)
+      .asifnot("selected", selector !== undefined ? STATE.$(selector) : undefined ))
+    .lift(WEBCOMP)
 
-  // webcomp.style :: (STRING, STRING, {attr:val}, STRING) -> PROMISE(STATE)
-  // Adds a new element with the given tagname and attributes to the given selector:
-  // Appends by default:
-  METAPROC.op("createElement", (selector, tagname, attributes, howToApply) => (STATE) => {
-    let elem = UTIL.foldObj((result, attr, val) => {
-      result += `{attr}="${val}" `;
+  // :: (STRING, {attributeName:attributeValue}, [NODE]) -> NODE
+  // Returns PROMISE of NODE of newly created element with given tagname, attributes, and optional children:
+  // NOTE: Children are all appended to new node:
+  WEBCOMP.createElement  = (tagname, attributes, children) => {
+    let elem = UTIL.foldObj(attributes || {}, (result, attr, val) => {
+      result += `${attr}="${val}" `;
       return result;
-    }, `<${tagname} `) + "></${tagname}>";
-    attachNode(STATE.$(selector), elem, howToApply || "append");
-  }),
+    }, `<${tagname} `) + `></${tagname}>`;
+    return children === undefined
+      ? Promise.resolve(WEBCOMP.toHTML(elem))
+      : children.reduce((elem, child) => {
+        return elem.then(async (parent) => {
+          parent.children.push(await child)
+          return parent;
+        });
+      }, Promise.resolve(WEBCOMP.toHTML(elem)))
+  }
 
-  // webcomp.loadElement :: (STRING, STRING) -> PROMISE(STATE)
-  // Loads in HTML and appends it to the given seletor:
-  // NOTE: Appends by default;
-  MEATAPROC.op("loadElement", (selector, path) => async (STATE) => {
-    try {
-      let html = await loadResource(path, "utf8");
-      attachNode(STATE.$(selector), elem, howToApply || "append");
-    } catch (err) {
-      console.log(err);
-      attachNode(STATE.$(selector), `<!-- Could not load ${path} -->`, howToApply || "append");
-    }
-  }),
+  // :: STRING -> NODE
+  // Return NODE of newly create element from given STRING of HTML:
+  WEBCOMP.toHTML = (HTMLString) => cheerio.parseHTML(HTMLString)[0];
 
-  // webcomp.style :: (STRING, BOOLEAN) -> PROMISE(STATE)
-  // Appends CSS to node stored in STATE:
-  METAPROC.op("style", (path, load) => async (STATE) => {
-    try {
-      if (load) {
-        let css = await loadResource(path, 'utf8');
-        STATE.$("head").append(`<style>${css}</style>`);
-      } else {
-        STATE.$("head").append(`<link rel="stylesheet" href="${path}">`);
-      }
-    } catch (err) {
-      console.log(err);
-      STATE.$("head").append(`<!-- Could not load ${path} -->`);
-    }
-  }),
+  // loadResource :: (STRING) -> PROMISE(*)
+  // Checks if ref is for a file or absolute URL, then loads that resource:
+  WEBCOMP.loadResource = (ref, encoding) => {
+    // https://stackoverflow.com/questions/10687099/how-to-test-if-a-url-string-is-absolute-or-relative
+    let patt = /^https?:\/\//i;   // TODO: Sigh
+    return patt.test(ref)
+      ? axios.get(ref).then((res) => res.data)
+      : UTIL.loadFile(ref, encoding).catch((err) => {
+        throw err;
+      })
+  }
 
-  // webcomp.script :: (STRING, BOOLEAN) -> PROMISE(STATE)
-  // Appends SCRIPT to node stored in STATE:
-  METAPROC.op("script", (path, load) => async (STATE) => {
-    try {
-      if (load) {
-        let js = await loadResource(path, 'utf8');
-        STATE.$("head").append(`<script>${js}</script>`)
-      } else {
-        STATE.$("head").append(`<script src="${path}></script>"`)
-      }
-    } catch (err) {
-      console.log(err);
-      STATE.$("head").append(`<!-- Could not load ${path} -->`);
-    }
-  }),
-
-  // webcomp.html :: (STRING, (NODE, STATE) -> VOID) -> PROMISE(STATE)
-  // Append function to node stored in STATE:
-  // NOTE: Node value passed to function is a NODE object from cheerio:
-  METAPROC.op("html", (selector, fn) => async (STATE) => {
-    $(selector).toArray(async (node) => {
-      try {
-        await fn(node, STATE);
-      } catch (err) {
-        console.log(err);
-      }
-    })
-  }),
-
-  // webcomp.webcomp :: (STRING, WEBCOMP, STRING) -> PROMISE(STATE)
-  // Initalizes a web component and modifies node stored in state accordingly:
-  // NOTE: By default, webcomp REPLACES selected node:
-  METAPROC.op("webcomp", (selector, webcomp, howToApply) => async (STATE) {
-    $(selector).toArray.map(async (node) => {
-      try {
-        let result = await webcomp(node, STATE.model);
-        let $$ = cheerio.load(result);
-        attachNode(STATE.$, node, $("body").html(), howToApply || "replace");
-      } catch (err) {
-        console.log(err)
-      }
-    })
+  // loadHTML :: (STRING) -> PROMISE(NODE)
+  // Loads HTML and returns promise of HTML as NODE:
+  WEBCOMP.loadHTML = (ref) => WEBCOMP.loadResource(ref, "utf8").then((html) => {
+    return cheerio.parseHTML(html);
   })
 
-]
-
-/**
- *
- *  Subprocesses
- *
- */
-
- // :: (STATE) -> PROMISE(STRING)
- // Attaches event handlers to HTML and returns that HTML as a STRING:
- function expandControllers(STATE) {
-
-   // Expand controllers into a composeable functions to applied to events of a certian type:
-   let controllers = STATE.controllers.reduce((controllers, controller) => {
-     if (controllers[controller.evtName] === undefined) {
-       controllers[controller.evtName] = [];
-     }
-     controllers[controller.evtName].push(`function (evt) {
-         let isNode = (`${controller.pred}`)(evt.target);
-         if (isNode) {
-           (`${controller.fn}`)(evt)
-         }
-     }`);
-     return controllers;
-   }, {});
-
-   // Expand those composeable functions into client-side event handlers attached to BODY:
-   let eventHandlers = UTIL.foldObj(controllers, (js, evtName, controllers) => {
-     js += `d.querySelector("body").addEventListener("${evtName}", function (evt) {
-       composeAll(${JSON.stringify(controllers)})(evt)
-     });\n`
-     return js;
-   }, `(function () {
-     let d = document;\n
-     let composeAll = ${UTIL.composeAll.toString()};\n
-   `) + '})()';
-
-   // Append event handlers to BODY:
-   $("body").append(`<script>${eventHandlers}</script>`);
-
-   // Return HTML as STRING:
-   return $.html();
-
- }
-
- /**
-  *
-  * Support Functions
-  *
-  */
-
-// :: (STRING) -> PROMISE(STRING)
-// Checks if ref is for a file or absolute URL, then loads that resource:
-// NOTE: Only utf8 encoded resources are currently supported:
-function loadResource(ref) {
-  // https://stackoverflow.com/questions/10687099/how-to-test-if-a-url-string-is-absolute-or-relative
-  let patt = /^https?:\/\//i;   // TODO: Sigh
-  return patt.test(ref)
-    ? UTIL.loadText(ref)
-    : axios.get(ref).then((res) => res.data)
-}
-
-// :: (CHEERIO, STRING, STRING) -> VOID
-// NOTE: DOM is referring to $(selector), where $ is an instance of CHEERIO
-function attachNode(DOM, html, howToApply) {
-  let cases = {
-    "append":(html) => DOM.append(html),
-    "prepend":(html) => DOM.prepend(html),
-    "after":(html) => DOM.after(html),
-    "before":(html) => DOM.before(html),
-    "insertBefore":(html) => DOM.insertBefore(html),
-    "insertAfter":(html) => DOM.insertAfter(html),
-    "replace":(html) => DOM.replace(html),
-    "innerHTML":(html) => {
-      DOM.empty();      // Remove all children
-      DOM.append(html); // Adds given HTML as only child
-    }
-  };
-  // Check if case is defined and apply to HTML, otherwise throw error:
-  if (cases[howToApply] !== undefined) {
-    cases[howToApply](html);
-  } else {
-    throw "Don't know how to apply result";
+  // loadStyle :: (STRING, BOOLEAN) -> PROMISE(NODE)
+  // If download is TRUE, dowloads CSS from ref and wraps in STYLE tag, otherwise
+  // returns LINK tag with HREF set to ref:
+  WEBCOMP.loadCSS = (ref, download) => {
+    let elem = download === true
+      ? WEBCOMP.loadResource(ref, "utf8").then((css) => `<styles>${css}</styles>`)
+      : Promise.resolve(`<link rel="stylesheet" type="text/css" href="${ref}" />`)
+    return elem.then(WEBCOMP.toHTML);
   }
-}
+
+  // loadJS :: (STRING, BOOLEAN) -> PROMISE(NODE)
+  // If download is TRUE, dowloads JS from ref and wraps in SCRIPT tag, otherwise
+  // returns SCRIPT tag with SRC set to ref:
+  // NOTE: $.parseHTML does not return SCRIPT element:
+  WEBCOMP.loadJS = (ref, download) => {
+    let elem = download === true
+      ? WEBCOMP.loadResource(ref, "utf8").then((js) => `<script>${js}</script>`)
+      : Promise.resolve(`<script src="${ref}"></script>`)
+    return elem.then(cheerio.load).then(($) => $("head").first())
+  }
+
+  // :: (STATE) -> STRING
+  // Convenience method for returning $ as STRING:
+  // e.g. WEBCOMP.log(WEBCOMP.toString)
+  WEBCOMP.toString = (STATE) => STATE.$.html();
+
+  // :: (STATE) -> STRING
+  // Convenience method for selected NODE as STRING:
+  // e.g. WEBCOMP.log(WEBCOMP.selectedToString)
+  WEBCOMP.selectedToString = (STATE) => STATE.$(STATE.selected).html()

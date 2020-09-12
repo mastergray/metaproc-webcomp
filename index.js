@@ -20,6 +20,12 @@ module.exports = WEBCOMP = (STATE) => METAPROC.Standard(STATE)
     return selected;
   }))
 
+  // lift_DOM :: VOID -> PROMISE(STRING)
+  // Returns promise of DOM as STRING:
+  .augment("lift_DOM", () => metaproc => metaproc.lift(STATE=>{
+    return STATE.then(WEBCOMP.toString)
+  }))
+
   /**
    *
    *  DOM Operations
@@ -61,6 +67,13 @@ module.exports = WEBCOMP = (STATE) => METAPROC.Standard(STATE)
     selected.replaceWith(await node);
     return selected;
   }))
+
+  // :: (VOID -> STRING) -> WECOMP
+  // Replaces selected node with resuult of given function:
+  .augment("replaceFrom", (fn) => metaproc => metaproc.apto("selected", async (selected, STATE) => {
+   selected.replaceWith(await fn());
+   return selected;
+ }))
 
   // innerHTML :: (NODE|STRING|PROMISE(NODE|STRING)) -> (METAPROC) -> METAROC
   // Replace HTML with NODE, HTMLString, or PROMISE of NODE or HTMLString:
